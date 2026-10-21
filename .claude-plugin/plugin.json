@@ -1,5 +1,5 @@
 {
   "name": "self-compact",
-  "version": "0.1.0",
-  "description": "Gives Claude a compact_context tool: it decides when to compact, the mod compacts once the turn ends, only past the idle-compaction size"
+  "version": "0.2.0",
+  "description": "Gives Claude a compact_context tool: it decides when to compact, the mod compacts once the turn ends, only past the idle-compaction size, reminds it past 400k tokens, and carries on with the work it names"
 }
