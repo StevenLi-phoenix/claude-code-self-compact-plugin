@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.1] - 2026-10-20
+
+### Changed
+- The reminder past 400k no longer rides on every prompt: a prompt gets it on crossing the line, then only each further 100k, the same count tool results use.
+
 ## [0.2.0] - 2026-10-20
 
 ### Added

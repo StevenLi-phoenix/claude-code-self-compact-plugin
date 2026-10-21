@@ -274,7 +274,7 @@ describe('carrying on', () => {
 })
 
 describe('reminder past 400k', () => {
-  test('each prompt past 400k reminds Claude to look for a breakpoint; at 400k none', async ($, on) => {
+  test('a prompt past 400k reminds Claude to look for a breakpoint; at 400k none', async ($, on) => {
     const w = world(on, 400_000)
     expect(reminded(await $.prompt.submit(prompt()))).toBe('')
 
@@ -284,7 +284,16 @@ describe('reminder past 400k', () => {
     expect(text).toContain(TOOL)
     expect(text).toContain('good breakpoint')
     expect(text).toContain('not an order')
+  })
+
+  test('not on every prompt: again only once the context grew another 100k', async ($, on) => {
+    const w = world(on, 450_000)
     expect(reminded(await $.prompt.submit(prompt()))).toContain('450k tokens')
+    expect(reminded(await $.prompt.submit(prompt()))).toBe('')
+    w.setTokens(549_000)
+    expect(reminded(await $.prompt.submit(prompt()))).toBe('')
+    w.setTokens(550_000)
+    expect(reminded(await $.prompt.submit(prompt()))).toContain('550k tokens')
   })
 
   test('the prompt as typed is kept, and context already attached stays first', async ($, on) => {
@@ -316,11 +325,15 @@ describe('reminder past 400k', () => {
     expect(await step(520_000)).toContain('520k tokens')
   })
 
-  test('a prompt’s reminder counts for the turn’s tool calls', async ($, on) => {
+  test('prompts and tool calls share one count', async ($, on) => {
     const w = world(on, 450_000)
     expect(reminded(await $.prompt.submit(prompt()))).toContain('450k')
     w.setTokens(500_000)
     expect(reminded(await $.tool.call({ tool: 'Read', file_path: '/tmp/x' }))).toBe('')
+    w.setTokens(560_000)
+    expect(reminded(await $.tool.call({ tool: 'Read', file_path: '/tmp/x' }))).toContain('560k')
+    w.setTokens(600_000)
+    expect(reminded(await $.prompt.submit(prompt()))).toBe('')
   })
 
   test('after a compaction the next crossing reminds again', async ($, on) => {

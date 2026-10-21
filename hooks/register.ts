@@ -20,8 +20,9 @@ const RETRY_MS = 2_000
 const MAX_RETRIES = 5
 
 // Past this size Claude is reminded to look for a breakpoint to compact at (its
-// judgment, not an order): on every prompt, and inside a long turn after a tool
-// call each time the context grew another step. 2026-10-20: a session ran to 440k with nobody calling the tool.
+// judgment, not an order): once on crossing it, then each time the context grew
+// another step, at a prompt or after a tool call, whichever comes first. Not on
+// every prompt (2026-10-20). 2026-10-20: a session ran to 440k with nobody calling the tool.
 const REMIND_TOKENS = 400_000
 const REMIND_STEP = 100_000
 
@@ -95,9 +96,9 @@ async function carryOn($: EngineInterface, job: Pending): Promise<void> {
   }
 }
 
-// What Claude reads past the reminder size, or undefined. A prompt always gets
-// it; a tool call only once the context grew a step past the last reminder.
-async function reminder($: EngineInterface, always: boolean): Promise<string | undefined> {
+// What Claude reads past the reminder size, or undefined: on crossing it, then
+// only once the context grew a step past the last reminder.
+async function reminder($: EngineInterface): Promise<string | undefined> {
   if (pending !== undefined || (await isCompactDisabled($))) return undefined
 
   // Never below the size the tool accepts, or the reminder points at a refusal.
@@ -107,7 +108,7 @@ async function reminder($: EngineInterface, always: boolean): Promise<string | u
     remindedAt = undefined
     return undefined
   }
-  if (!always && remindedAt !== undefined && tokens < remindedAt + REMIND_STEP) return undefined
+  if (remindedAt !== undefined && tokens < remindedAt + REMIND_STEP) return undefined
 
   remindedAt = tokens
   $.ui.log(`reminded Claude to compact at ${fmt(tokens)} tokens`, { to: 'debug' })
@@ -224,7 +225,7 @@ export const register: Register = on => {
     // /compact is already the compaction; a reminder would land in its summary.
     if (e.command?.name === 'compact') return next(e)
 
-    const text = await reminder($, true).catch(() => undefined)
+    const text = await reminder($).catch(() => undefined)
     return next(text ? { ...e, context: [...(e.context ?? []), text] } : e)
   })
 
@@ -232,7 +233,7 @@ export const register: Register = on => {
     const done = await next(e)
     if (e.agentId !== undefined || done.deny !== undefined) return done
 
-    const text = await reminder($, false).catch(() => undefined)
+    const text = await reminder($).catch(() => undefined)
     return text ? { ...done, context: [...(done.context ?? []), text] } : done
   })
 
