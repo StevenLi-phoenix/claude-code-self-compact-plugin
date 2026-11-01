@@ -23,7 +23,7 @@ const MAX_RETRIES = 5
 // judgment, not an order): once on crossing it, then each time the context grew
 // another step, at a prompt or after a tool call, whichever comes first. Not on
 // every prompt (2026-10-20). 2026-10-20: a session ran to 440k with nobody calling the tool.
-const REMIND_TOKENS = 400_000
+const REMIND_TOKENS = 300_000
 const REMIND_STEP = 100_000
 
 const SCHEMA = {

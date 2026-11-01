@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.2] - 2026-11-01
+
+### Changed
+- Reminder line lowered from 400k to 300k tokens (still never below the idle-compaction size).
+
 ## [0.2.1] - 2026-10-20
 
 ### Changed

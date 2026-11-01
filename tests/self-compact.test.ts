@@ -273,31 +273,31 @@ describe('carrying on', () => {
   test('a failed compaction does not carry on', settles('fail'))
 })
 
-describe('reminder past 400k', () => {
-  test('a prompt past 400k reminds Claude to look for a breakpoint; at 400k none', async ($, on) => {
-    const w = world(on, 400_000)
+describe('reminder past 300k', () => {
+  test('a prompt past 300k reminds Claude to look for a breakpoint; at 300k none', async ($, on) => {
+    const w = world(on, 300_000)
     expect(reminded(await $.prompt.submit(prompt()))).toBe('')
 
-    w.setTokens(450_000)
+    w.setTokens(350_000)
     const text = reminded(await $.prompt.submit(prompt()))
-    expect(text).toContain('450k tokens')
+    expect(text).toContain('350k tokens')
     expect(text).toContain(TOOL)
     expect(text).toContain('good breakpoint')
     expect(text).toContain('not an order')
   })
 
   test('not on every prompt: again only once the context grew another 100k', async ($, on) => {
-    const w = world(on, 450_000)
+    const w = world(on, 350_000)
+    expect(reminded(await $.prompt.submit(prompt()))).toContain('350k tokens')
+    expect(reminded(await $.prompt.submit(prompt()))).toBe('')
+    w.setTokens(449_000)
+    expect(reminded(await $.prompt.submit(prompt()))).toBe('')
+    w.setTokens(450_000)
     expect(reminded(await $.prompt.submit(prompt()))).toContain('450k tokens')
-    expect(reminded(await $.prompt.submit(prompt()))).toBe('')
-    w.setTokens(549_000)
-    expect(reminded(await $.prompt.submit(prompt()))).toBe('')
-    w.setTokens(550_000)
-    expect(reminded(await $.prompt.submit(prompt()))).toContain('550k tokens')
   })
 
   test('the prompt as typed is kept, and context already attached stays first', async ($, on) => {
-    world(on, 450_000)
+    world(on, 350_000)
     const entered = await $.prompt.submit({ ...prompt('fix it'), context: ['from another hook'] })
     expect(entered.text).toBe('fix it')
     expect(entered.context?.[0]).toBe('from another hook')
@@ -305,61 +305,61 @@ describe('reminder past 400k', () => {
   })
 
   test('none while a compaction is queued, and none on /compact', async ($, on) => {
-    world(on, 450_000)
+    world(on, 350_000)
     expect(reminded(await $.prompt.submit(prompt('/compact', { name: 'compact', args: '' })))).toBe('')
     await $.tool.call({ tool: TOOL })
     expect(reminded(await $.prompt.submit(prompt()))).toBe('')
     expect(reminded(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe('')
   })
 
-  test('inside a turn: on crossing 400k, then again only every 100k more', async ($, on) => {
-    const w = world(on, 350_000)
+  test('inside a turn: on crossing 300k, then again only every 100k more', async ($, on) => {
+    const w = world(on, 250_000)
     const step = async (tokens: number) => {
       w.setTokens(tokens)
       return reminded(await $.tool.call({ tool: 'Bash', command: 'ls' }))
     }
-    expect(await step(350_000)).toBe('')
+    expect(await step(250_000)).toBe('')
+    expect(await step(320_000)).toContain('320k tokens')
+    expect(await step(380_000)).toBe('')
+    expect(await step(419_000)).toBe('')
     expect(await step(420_000)).toContain('420k tokens')
-    expect(await step(480_000)).toBe('')
-    expect(await step(519_000)).toBe('')
-    expect(await step(520_000)).toContain('520k tokens')
   })
 
   test('prompts and tool calls share one count', async ($, on) => {
-    const w = world(on, 450_000)
-    expect(reminded(await $.prompt.submit(prompt()))).toContain('450k')
-    w.setTokens(500_000)
+    const w = world(on, 350_000)
+    expect(reminded(await $.prompt.submit(prompt()))).toContain('350k')
+    w.setTokens(400_000)
     expect(reminded(await $.tool.call({ tool: 'Read', file_path: '/tmp/x' }))).toBe('')
-    w.setTokens(560_000)
-    expect(reminded(await $.tool.call({ tool: 'Read', file_path: '/tmp/x' }))).toContain('560k')
-    w.setTokens(600_000)
+    w.setTokens(460_000)
+    expect(reminded(await $.tool.call({ tool: 'Read', file_path: '/tmp/x' }))).toContain('460k')
+    w.setTokens(500_000)
     expect(reminded(await $.prompt.submit(prompt()))).toBe('')
   })
 
   test('after a compaction the next crossing reminds again', async ($, on) => {
-    const w = world(on, 450_000)
-    expect(reminded(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toContain('450k')
+    const w = world(on, 350_000)
+    expect(reminded(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toContain('350k')
     w.setTokens(40_000)
     expect(reminded(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe('')
-    w.setTokens(410_000)
-    expect(reminded(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toContain('410k')
+    w.setTokens(310_000)
+    expect(reminded(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toContain('310k')
   })
 
   test('a subagent’s tool calls carry none', async ($, on) => {
-    world(on, 450_000)
+    world(on, 350_000)
     expect(reminded(await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'agent-1' }))).toBe('')
   })
 
   test('none when compacting is off or the tool would refuse at this size', async ($, on) => {
-    world(on, 450_000, { DISABLE_COMPACT: '1' })
+    world(on, 350_000, { DISABLE_COMPACT: '1' })
     expect(reminded(await $.prompt.submit(prompt()))).toBe('')
   })
 
-  test('an idle-compaction size above 400k raises the reminder with it', async ($, on) => {
-    const w = world(on, 450_000, { CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS: '500000' })
+  test('an idle-compaction size above 300k raises the reminder with it', async ($, on) => {
+    const w = world(on, 350_000, { CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS: '400000' })
     expect(reminded(await $.prompt.submit(prompt()))).toBe('')
-    w.setTokens(510_000)
-    expect(reminded(await $.prompt.submit(prompt()))).toContain('past 500k')
+    w.setTokens(410_000)
+    expect(reminded(await $.prompt.submit(prompt()))).toContain('past 400k')
   })
 })
 
