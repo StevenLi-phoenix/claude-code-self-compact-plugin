@@ -216,7 +216,7 @@ describe('carrying on', () => {
     expect(said(ran)).not.toContain('..')
   })
 
-  test('without next the person speaks next, and the tool says so', async ($, on) => {
+  test('without next the user speaks next, and the tool says so', async ($, on) => {
     const w = world(on, 450_000)
     const ran = await $.tool.call({ tool: TOOL })
     expect(said(ran)).toContain('pass next')
@@ -245,7 +245,7 @@ describe('carrying on', () => {
     expect(w.submitted).toEqual([])
   })
 
-  // Each try costs a model call: after a skip or a failure the person decides.
+  // Each try costs a model call: after a skip or a failure the user decides.
   const settles = (outcome: 'skip' | 'fail') => async ($: Engine, on: On) => {
     mock.env(on, {})
     const clock = mock.clock(on)

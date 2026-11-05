@@ -41,7 +41,7 @@ const SCHEMA = {
     next: {
       type: 'string',
       description:
-        'The work that remains, as an instruction to yourself (e.g. "run the full suite, then commit"). Sent as a prompt once the compaction is done, so you carry on by yourself; without it the session waits for the person. Leave it out only when the work is finished.',
+        'The work that remains, as an instruction to yourself (e.g. "run the full suite, then commit"). Sent as a prompt once the compaction is done, so you carry on by yourself; without it the session waits for the user. Leave it out only when the work is finished.',
     },
   },
   additionalProperties: false,
@@ -80,12 +80,12 @@ function describe(min: number): string {
     'Compact (summarize) this conversation once the current turn ends, freeing context for the work ahead.',
     'Call it at a natural breakpoint: a subtask is done and verified, and what comes next does not need the raw detail of what came before (long tool outputs, dead ends, superseded drafts).',
     `Accepted only when the context holds more than ${fmt(min)} tokens (the idle-compaction size); below that it is refused, so carry on without compacting.`,
-    'After calling it, finish your reply: compaction runs after this turn. Pass `next` whenever work remains: the next turn then starts on it from the summary; without it the session waits for the person.',
+    'After calling it, finish your reply: compaction runs after this turn. Pass `next` whenever work remains: the next turn then starts on it from the summary; without it the session waits for the user.',
   ].join(' ')
 }
 
 // Starts the turn after the compaction on the work Claude said remains. Without
-// it the session sat idle until the person typed (2026-10-20).
+// it the session sat idle until the user typed (2026-10-20).
 async function carryOn($: EngineInterface, job: Pending): Promise<void> {
   if (!job.next) return
   try {
@@ -213,7 +213,7 @@ export const register: Register = on => {
 
     const after = next
       ? `then your next turn starts from the summary on: ${next}`
-      : 'then the session waits for the person. If work remains, call again and pass next'
+      : 'then the session waits for the user. If work remains, call again and pass next'
     // `next` often ends a sentence itself; don't stop it twice.
     const stop = /[.!?。！？]$/.test(after) ? '' : '.'
     return {
@@ -242,7 +242,7 @@ export const register: Register = on => {
     if (e.agentId !== undefined || pending === undefined) return answered
 
     if (e.reason !== 'answer') {
-      // Interrupted or failed turn: the person takes over, so drop the request.
+      // Interrupted or failed turn: the user takes over, so drop the request.
       $.ui.log(`turn ended (${e.reason}); the queued compaction is dropped`)
       pending = undefined
       $.ui.status(undefined)

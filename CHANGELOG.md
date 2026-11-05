@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.3] - 2026-11-05
+
+### Changed
+- Tool description and queued-compaction reply now say "the user" instead of "the person".
+
 ## [0.2.2] - 2026-11-01
 
 ### Changed
