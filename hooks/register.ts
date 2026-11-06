@@ -26,6 +26,9 @@ const MAX_RETRIES = 5
 const REMIND_TOKENS = 300_000
 const REMIND_STEP = 100_000
 
+// What a carry-on quotes of the Stop hook that held the work open.
+const HELD_MAX = 2_000
+
 const SCHEMA = {
   type: 'object',
   properties: {
@@ -41,16 +44,27 @@ const SCHEMA = {
     next: {
       type: 'string',
       description:
-        'The work that remains, as an instruction to yourself (e.g. "run the full suite, then commit"). Sent as a prompt once the compaction is done, so you carry on by yourself; without it the session waits for the user. Leave it out only when the work is finished.',
+        'The work that remains, as an instruction to yourself (e.g. "run the full suite, then commit"). Sent as a prompt once the compaction is done, so you carry on by yourself; without it the session waits for the user, unless a Stop hook such as /goal still wants work done. Leave it out only when the work is finished.',
     },
   },
   additionalProperties: false,
 }
 
-type Pending = { instructions?: string; reason?: string; next?: string; tokens: number }
+type Pending = {
+  instructions?: string
+  reason?: string
+  next?: string
+  tokens: number
+  // What a Stop hook answered the last time this turn tried to end: more work wanted.
+  heldBy?: string
+}
 
 let pending: Pending | undefined
 let isCompacting = false
+// A compaction the mod ended a turn for did not run. Until one does, requests wait
+// for a real turn end: each forced round costs a model call, so a summarizer that
+// keeps failing must not loop them.
+let isForcingOff = false
 // The context size at the last reminder; cleared once it is back under the line.
 let remindedAt: number | undefined
 
@@ -81,19 +95,36 @@ function describe(min: number): string {
     'Call it at a natural breakpoint: a subtask is done and verified, and what comes next does not need the raw detail of what came before (long tool outputs, dead ends, superseded drafts).',
     `Accepted only when the context holds more than ${fmt(min)} tokens (the idle-compaction size); below that it is refused, so carry on without compacting.`,
     'After calling it, finish your reply: compaction runs after this turn. Pass `next` whenever work remains: the next turn then starts on it from the summary; without it the session waits for the user.',
+    'A Stop hook such as /goal does not hold the compaction back: the turn still ends for it, and the work resumes after it.',
   ].join(' ')
 }
 
 // Starts the turn after the compaction on the work Claude said remains. Without
-// it the session sat idle until the user typed (2026-10-20).
-async function carryOn($: EngineInterface, job: Pending): Promise<void> {
-  if (!job.next) return
+// it the session sat idle until the user typed (2026-10-20). Another turn can get
+// in first (a background task's notification) and work on, so the prompt never
+// reads as if nothing were done yet (2026-11-06).
+async function carryOn($: EngineInterface, job: Pending, didNotRun?: string): Promise<void> {
+  const { next, heldBy } = job
+  if (!next && heldBy === undefined) return
+  const text = [
+    didNotRun === undefined ? 'Compacted at your request.' : `The compaction did not run (${didNotRun}); you keep the context you had.`,
+    next ? `Carry on with what is not done yet: ${next}` : 'Carry on with what the Stop hook below still asks for.',
+    ...(heldBy === undefined ? [] : [`\n\nA Stop hook held this work open when the turn ended: ${heldBy.slice(0, HELD_MAX)}`]),
+  ].join(' ')
   try {
-    await $.prompt.submit({ text: `Compacted at your request. Carry on: ${job.next}` })
-    $.ui.log(`carrying on after the compaction: ${job.next}`, { to: 'debug' })
+    await $.prompt.submit({ text })
+    $.ui.log(`carrying on after the compaction: ${next ?? 'what the Stop hook asks for'}`, { to: 'debug' })
   } catch (err) {
     $.ui.log(`could not carry on after the compaction: ${err instanceof Error ? err.message : String(err)}`)
   }
+}
+
+// A compaction that did not run: the user speaks next, unless the mod ended the
+// turn over a Stop hook. Then resuming is its job, or a /goal sits paused.
+async function afterNoRun($: EngineInterface, job: Pending, why: string): Promise<void> {
+  if (job.heldBy === undefined) return
+  isForcingOff = true
+  await carryOn($, job, why)
 }
 
 // What Claude reads past the reminder size, or undefined: on crossing it, then
@@ -146,8 +177,10 @@ async function compact($: EngineInterface, job: Pending, attempt: number): Promi
 
     if (done.skip !== undefined) {
       $.ui.log(`compaction skipped: ${done.skip}`)
+      await afterNoRun($, job, done.skip)
       return
     }
+    isForcingOff = false
     const line = `compacted at Claude’s request: ${fmt(done.tokensBefore ?? job.tokens)} → ${fmt(done.tokensAfter)} tokens`
     $.ui.toast(line)
     $.ui.log(line, { to: 'debug' })
@@ -173,6 +206,7 @@ async function compact($: EngineInterface, job: Pending, attempt: number): Promi
     pending = undefined
     $.ui.status(undefined)
     $.ui.log(`compaction failed: ${message}`)
+    await afterNoRun($, job, message)
   } finally {
     isCompacting = false
   }
@@ -235,6 +269,30 @@ export const register: Register = on => {
 
     const text = await reminder($).catch(() => undefined)
     return text ? { ...done, context: [...(done.context ?? []), text] } : done
+  })
+
+  // /goal is a Stop hook: until its condition holds it turns each attempt to end
+  // the turn into more work, so the compaction queued on turn.complete waited. A
+  // session then went from 349k to 436k and compacted nine minutes later, mid-work,
+  // on a `next` and `focus` that no longer applied (2026-11-06). So the turn ends
+  // here instead. Asking beneath first lets a met goal clear as usual, and the block
+  // stays in the answer so the goal check is recorded; `preventContinuation` is what
+  // the engine reads first.
+  on('classic.Stop', async ($, e, next) => {
+    const answered = await next(e)
+    if (pending === undefined) return answered
+
+    pending.heldBy = answered.block
+    if (answered.block === undefined) return answered
+    if (isForcingOff) {
+      // The turn works on past the breakpoint, so what Claude named goes stale.
+      pending.next = undefined
+      $.ui.log('a Stop hook is holding the turn open; the queued compaction waits, as the last one did not run')
+      return answered
+    }
+
+    $.ui.log(`ending the turn to compact, over a Stop hook: ${answered.block.slice(0, 200)}`)
+    return { ...answered, preventContinuation: true, stopReason: 'self-compact: ending the turn to compact; the work resumes after it' }
   })
 
   on('turn.complete', async ($, e, next) => {

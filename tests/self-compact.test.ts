@@ -202,6 +202,8 @@ describe('carrying on', () => {
     expect(w.submitted.length).toBe(1)
     expect(w.submitted[0]?.after).toBe(1)
     expect(w.submitted[0]?.text).toContain('run the full suite, then commit')
+    // Another turn can get in first, so it must not read as if nothing were done.
+    expect(w.submitted[0]?.text).toContain('not done yet')
 
     // Once only: the next turn end sends nothing.
     await $.turn.complete(turnEnd())
@@ -271,6 +273,171 @@ describe('carrying on', () => {
   }
   test('a skipped compaction does not carry on', settles('skip'))
   test('a failed compaction does not carry on', settles('fail'))
+})
+
+// /goal is a Stop hook: until its condition holds it turns each attempt to end the
+// turn into more work, and the queued compaction only runs once the turn ends.
+describe('a Stop hook holding the turn open', () => {
+  const NOT_MET = '[done.txt exists]: not satisfied, done.txt is missing'
+  const stop = ($: Engine) => $.classic.Stop({ stop_hook_active: false })
+
+  test('a queued compaction ends the turn over the block, and the block still counts', async ($, on) => {
+    const w = world(on, 450_000)
+    on('classic.Stop', () => ({ block: NOT_MET }))
+    await $.tool.call({ tool: TOOL, focus: 'keep the plan', next: 'step 3' })
+
+    const ran = await stop($)
+    expect(ran.preventContinuation).toBe(true)
+    expect(ran.block).toBe(NOT_MET)
+    expect(ran.stopReason ?? '').toContain('compact')
+
+    await $.turn.complete(turnEnd())
+    await w.clock.settle()
+    expect(w.compactions).toEqual(['keep the plan'])
+    expect(w.submitted.length).toBe(1)
+    expect(w.submitted[0]?.after).toBe(1)
+    expect(w.submitted[0]?.text).toContain('step 3')
+    expect(w.submitted[0]?.text).toContain('done.txt is missing')
+  })
+
+  test('with nothing queued the block stands', async ($, on) => {
+    const w = world(on, 450_000)
+    on('classic.Stop', () => ({ block: NOT_MET }))
+    const ran = await stop($)
+    expect(ran.block).toBe(NOT_MET)
+    expect(ran.preventContinuation).toBeUndefined()
+    expect(w.compactions).toEqual([])
+  })
+
+  test('a Stop hook that passes changes nothing: no next, nobody resumes', async ($, on) => {
+    const w = world(on, 450_000)
+    on('classic.Stop', () => ({}))
+    await $.tool.call({ tool: TOOL })
+    const ran = await stop($)
+    expect(ran.preventContinuation).toBeUndefined()
+    await $.turn.complete(turnEnd())
+    await w.clock.settle()
+    expect(w.compactions).toEqual([undefined])
+    expect(w.submitted).toEqual([])
+  })
+
+  test('without next the session still resumes, on what the Stop hook asks for', async ($, on) => {
+    const w = world(on, 450_000)
+    on('classic.Stop', () => ({ block: NOT_MET }))
+    await $.tool.call({ tool: TOOL })
+    await stop($)
+    await $.turn.complete(turnEnd())
+    await w.clock.settle()
+    expect(w.compactions).toEqual([undefined])
+    expect(w.submitted.length).toBe(1)
+    expect(w.submitted[0]?.text).toContain('done.txt is missing')
+  })
+
+  test('resumes when auto-compaction got there first', async ($, on) => {
+    const w = world(on, 450_000)
+    on('classic.Stop', () => ({ block: NOT_MET }))
+    await $.tool.call({ tool: TOOL })
+    await stop($)
+    w.setTokens(30_000)
+    await $.turn.complete(turnEnd())
+    await w.clock.settle()
+    expect(w.compactions).toEqual([])
+    expect(w.submitted[0]?.text).toContain('done.txt is missing')
+  })
+
+  test('an interrupted turn neither compacts nor resumes', async ($, on) => {
+    const w = world(on, 450_000)
+    on('classic.Stop', () => ({ block: NOT_MET }))
+    await $.tool.call({ tool: TOOL, next: 'step 3' })
+    await stop($)
+    await $.turn.complete(turnEnd('aborted'))
+    await w.clock.settle()
+    expect(w.compactions).toEqual([])
+    expect(w.submitted).toEqual([])
+  })
+
+  test('each queued compaction ends its turn', async ($, on) => {
+    const w = world(on, 450_000)
+    on('classic.Stop', () => ({ block: NOT_MET }))
+    await $.tool.call({ tool: TOOL, next: 'step 3' })
+    expect((await stop($)).preventContinuation).toBe(true)
+    await $.turn.complete(turnEnd())
+    await w.clock.settle()
+
+    w.setTokens(450_000)
+    await $.tool.call({ tool: TOOL, next: 'step 4' })
+    expect((await stop($)).preventContinuation).toBe(true)
+  })
+
+  // Ending the turn made resuming the mod's job, or the goal sits paused. It only
+  // does so once: each round costs a model call, and a summarizer that keeps
+  // failing must not loop them.
+  const noRun = (outcome: 'skip' | 'fail') => async ($: Engine, on: On) => {
+    mock.env(on, {})
+    const clock = mock.clock(on)
+    const submitted: string[] = []
+    let breaks = true
+    let compacted = 0
+    on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 450_000, window: 1_000_000 }, rateLimits: [] } }))
+    on('session.compact', () => {
+      if (!breaks) {
+        compacted += 1
+        return { messages: SUMMARY, tokensBefore: 450_000, tokensAfter: 450_000 }
+      }
+      if (outcome === 'fail') throw new Error('summarizer failed')
+      return { skip: 'a PreCompact hook blocked it' }
+    })
+    on('classic.Stop', () => ({ block: NOT_MET }))
+    on('prompt.submit', ($, e) => {
+      submitted.push(e.text)
+      return { text: e.text }
+    })
+    on('turn.complete', ($, e) => ({ text: e.answer }))
+    on('ui.log', () => ({ value: undefined }))
+    on('ui.status', () => ({ value: undefined }))
+    on('ui.toast', () => ({ value: undefined }))
+
+    await $.tool.call({ tool: TOOL, next: 'step 3' })
+    expect((await stop($)).preventContinuation).toBe(true)
+    await $.turn.complete(turnEnd())
+    await clock.settle()
+    expect(submitted.length).toBe(1)
+    expect(submitted[0]).toContain('did not run')
+    expect(submitted[0]).toContain('step 3')
+
+    // The next request waits for a real turn end instead of forcing one.
+    await $.tool.call({ tool: TOOL, next: 'step 4' })
+    expect((await stop($)).preventContinuation).toBeUndefined()
+
+    // A compaction that does run lifts that again.
+    breaks = false
+    await $.turn.complete(turnEnd())
+    await clock.settle()
+    expect(compacted).toBe(1)
+    // That turn worked on past the request, so its next is stale by now.
+    expect(submitted.length).toBe(2)
+    expect(submitted[1]).not.toContain('step 4')
+    expect(submitted[1]).toContain('done.txt is missing')
+    await $.tool.call({ tool: TOOL, next: 'step 5' })
+    expect((await stop($)).preventContinuation).toBe(true)
+  }
+  test('a skipped compaction still resumes the work, then stops forcing', noRun('skip'))
+  test('a failed compaction still resumes the work, then stops forcing', noRun('fail'))
+
+  test('a later pass that lets the turn end clears the hold: nobody resumes', async ($, on) => {
+    const w = world(on, 450_000)
+    let block: string | undefined = NOT_MET
+    on('classic.Stop', () => (block ? { block } : {}))
+    await $.tool.call({ tool: TOOL })
+    await stop($)
+    block = undefined
+    const ran = await stop($)
+    expect(ran.preventContinuation).toBeUndefined()
+    await $.turn.complete(turnEnd())
+    await w.clock.settle()
+    expect(w.compactions).toEqual([undefined])
+    expect(w.submitted).toEqual([])
+  })
 })
 
 describe('reminder past 300k', () => {
@@ -368,4 +535,5 @@ test('registers the tool in the prompt with the threshold in its description', a
   await $.session.start({ cwd: '/tmp', surface: null, isInteractive: false })
   expect(w.registered.map(r => r.name)).toEqual(['compact_context'])
   expect(w.registered[0]?.description ?? '').toContain('more than 200k tokens')
+  expect(w.registered[0]?.description ?? '').toContain('/goal')
 })
