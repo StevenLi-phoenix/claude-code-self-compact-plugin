@@ -1,7 +1,7 @@
 import type { On, TurnCompleteInput } from 'claude-code'
 import { describe, expect, mock, test, type Engine } from 'claude-code/testing'
 
-import { isBusy, SETTLE_MS } from '../hooks/register'
+import { isBusy, isCanceled, SETTLE_MS } from '../hooks/register'
 
 const TOOL = 'mcp__self-compact__compact_context'
 const SUMMARY = [{ role: 'user' as const, text: 'summary', toolUses: [] }]
@@ -171,6 +171,13 @@ describe('busy engine', () => {
     expect(isBusy('an external turn is driving the conversation; it compacts between turns')).toBe(true)
     expect(isBusy("a thin client's conversation lives on the remote session; compact it there")).toBe(false)
     expect(isBusy('prompt is too long')).toBe(false)
+  })
+
+  test('Esc during the compaction reads as canceled, a failure does not', () => {
+    // Verbatim from Claude Code 2.1.319.
+    expect(isCanceled('self-compact: $.session.compact: Compaction canceled.')).toBe(true)
+    expect(isCanceled('prompt is too long')).toBe(false)
+    expect(isCanceled('self-compact: $.session.compact: a turn is running (t9)')).toBe(false)
   })
 
   test('a non-busy rejection drops the request without retrying', async ($, on) => {

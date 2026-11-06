@@ -84,6 +84,9 @@ const fmt = (n: number | undefined): string =>
 export const isBusy = (message: string): boolean =>
   /turn is running|turn is in flight|compacts between turns/i.test(message)
 
+// The user pressed Esc during the compaction (2.1.319): they take over, /goal or not.
+export const isCanceled = (message: string): boolean => /compaction canceled/i.test(message)
+
 async function idleMinTokens($: EngineInterface): Promise<number> {
   const raw = (await $.env.get('CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS'))?.trim()
   const n = raw ? Number(raw) : NaN
@@ -242,7 +245,7 @@ async function compact($: EngineInterface, job: Pending, attempt: number): Promi
     pending = undefined
     $.ui.status(undefined)
     $.ui.log(`compaction failed: ${message}`)
-    afterNoRun($, job, message)
+    if (!isCanceled(message)) afterNoRun($, job, message)
   } finally {
     isCompacting = false
   }

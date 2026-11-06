@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5] - 2026-11-06
+
+### Fixed
+- A Stop hook such as `/goal` no longer holds a queued compaction back: a block now ends the turn for it, and the work resumes after it.
+- The carry-on no longer arrives late when a notification starts a turn first: it rides the next prompt or tool result, and only an idle session gets a prompt of its own.
+- The carry-on says "what is not done yet", so it never reads as if nothing were done.
+
 ## [0.2.4] - 2026-11-05
 
 ### Fixed
