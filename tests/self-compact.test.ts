@@ -1,7 +1,7 @@
 import type { On, TurnCompleteInput } from 'claude-code'
 import { describe, expect, mock, test, type Engine } from 'claude-code/testing'
 
-import { isBusy } from '../hooks/register'
+import { isBusy, SETTLE_MS } from '../hooks/register'
 
 const TOOL = 'mcp__self-compact__compact_context'
 const SUMMARY = [{ role: 'user' as const, text: 'summary', toolUses: [] }]
@@ -35,6 +35,7 @@ function world(on: On, tokens: number | undefined, env: Record<string, string> =
     registered.push({ name: e.name, description: e.description })
     return { value: { tool: `mcp__self-compact__${e.name}` } }
   })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('prompt.submit', ($, e) => {
@@ -55,6 +56,12 @@ const prompt = (text = 'next', command?: { name: string; args: string }) => ({
   origin: { kind: 'composer' as const },
   ...(command ? { command } : {}),
 })
+
+// Runs what is due, then past the wait before an idle session's own prompt.
+const drained = async (clock: { settle: () => Promise<void>; advance: (ms: number) => Promise<void> }) => {
+  await clock.settle()
+  await clock.advance(SETTLE_MS)
+}
 
 const reminded = (result: { context?: readonly string[] }): string => (result.context ?? []).join('\n')
 const said = (ran: { result?: unknown; deny?: string }): string => ran.deny ?? String(ran.result ?? '')
@@ -90,7 +97,7 @@ describe('threshold', () => {
     const ran = await $.tool.call({ tool: TOOL })
     expect(ran.deny).toBeUndefined()
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual([undefined])
   })
 
@@ -117,7 +124,7 @@ describe('deferral', () => {
     expect(w.compactions).toEqual([])
 
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual(['keep the plan'])
 
     // Nothing stays queued: the next turn end compacts nothing.
@@ -139,10 +146,10 @@ describe('deferral', () => {
     const w = world(on, 450_000)
     await $.tool.call({ tool: TOOL })
     await $.turn.complete(turnEnd('answer', 'agent-1'))
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual([])
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual([undefined])
   })
 
@@ -151,7 +158,7 @@ describe('deferral', () => {
     await $.tool.call({ tool: TOOL })
     w.setTokens(30_000) // auto-compaction ran meanwhile
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual([])
   })
 })
@@ -182,7 +189,7 @@ describe('busy engine', () => {
 
     await $.tool.call({ tool: TOOL })
     await $.turn.complete(turnEnd())
-    await clock.settle()
+    await drained(clock)
     expect(attempts).toBe(1)
     await clock.advance(30_000)
     await $.turn.complete(turnEnd())
@@ -197,7 +204,7 @@ describe('carrying on', () => {
     const ran = await $.tool.call({ tool: TOOL, focus: 'keep the plan', next: 'run the full suite, then commit' })
     expect(said(ran)).toContain('run the full suite, then commit')
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual(['keep the plan'])
     expect(w.submitted.length).toBe(1)
     expect(w.submitted[0]?.after).toBe(1)
@@ -223,7 +230,7 @@ describe('carrying on', () => {
     const ran = await $.tool.call({ tool: TOOL })
     expect(said(ran)).toContain('pass next')
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual([undefined])
     expect(w.submitted).toEqual([])
   })
@@ -233,7 +240,7 @@ describe('carrying on', () => {
     await $.tool.call({ tool: TOOL, next: 'step 3' })
     w.setTokens(30_000)
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual([])
     expect(w.submitted.map(s => s.text).join('')).toContain('step 3')
   })
@@ -268,7 +275,7 @@ describe('carrying on', () => {
 
     await $.tool.call({ tool: TOOL, next: 'step 3' })
     await $.turn.complete(turnEnd())
-    await clock.settle()
+    await drained(clock)
     expect(submitted).toEqual([])
   }
   test('a skipped compaction does not carry on', settles('skip'))
@@ -292,7 +299,7 @@ describe('a Stop hook holding the turn open', () => {
     expect(ran.stopReason ?? '').toContain('compact')
 
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual(['keep the plan'])
     expect(w.submitted.length).toBe(1)
     expect(w.submitted[0]?.after).toBe(1)
@@ -316,7 +323,7 @@ describe('a Stop hook holding the turn open', () => {
     const ran = await stop($)
     expect(ran.preventContinuation).toBeUndefined()
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual([undefined])
     expect(w.submitted).toEqual([])
   })
@@ -327,7 +334,7 @@ describe('a Stop hook holding the turn open', () => {
     await $.tool.call({ tool: TOOL })
     await stop($)
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual([undefined])
     expect(w.submitted.length).toBe(1)
     expect(w.submitted[0]?.text).toContain('done.txt is missing')
@@ -340,7 +347,7 @@ describe('a Stop hook holding the turn open', () => {
     await stop($)
     w.setTokens(30_000)
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual([])
     expect(w.submitted[0]?.text).toContain('done.txt is missing')
   })
@@ -351,7 +358,7 @@ describe('a Stop hook holding the turn open', () => {
     await $.tool.call({ tool: TOOL, next: 'step 3' })
     await stop($)
     await $.turn.complete(turnEnd('aborted'))
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual([])
     expect(w.submitted).toEqual([])
   })
@@ -362,7 +369,7 @@ describe('a Stop hook holding the turn open', () => {
     await $.tool.call({ tool: TOOL, next: 'step 3' })
     expect((await stop($)).preventContinuation).toBe(true)
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
 
     w.setTokens(450_000)
     await $.tool.call({ tool: TOOL, next: 'step 4' })
@@ -400,7 +407,7 @@ describe('a Stop hook holding the turn open', () => {
     await $.tool.call({ tool: TOOL, next: 'step 3' })
     expect((await stop($)).preventContinuation).toBe(true)
     await $.turn.complete(turnEnd())
-    await clock.settle()
+    await drained(clock)
     expect(submitted.length).toBe(1)
     expect(submitted[0]).toContain('did not run')
     expect(submitted[0]).toContain('step 3')
@@ -412,7 +419,7 @@ describe('a Stop hook holding the turn open', () => {
     // A compaction that does run lifts that again.
     breaks = false
     await $.turn.complete(turnEnd())
-    await clock.settle()
+    await drained(clock)
     expect(compacted).toBe(1)
     // That turn worked on past the request, so its next is stale by now.
     expect(submitted.length).toBe(2)
@@ -434,9 +441,138 @@ describe('a Stop hook holding the turn open', () => {
     const ran = await stop($)
     expect(ran.preventContinuation).toBeUndefined()
     await $.turn.complete(turnEnd())
-    await w.clock.settle()
+    await drained(w.clock)
     expect(w.compactions).toEqual([undefined])
     expect(w.submitted).toEqual([])
+  })
+})
+
+// The engine drains its queue the moment the compaction ends, and a plugin's prompt
+// only runs once idle, behind a notification. A session got its carry-on five minutes
+// late that way, as a new order, while it worked on the same thing. So whatever reaches
+// Claude first carries it, and only an idle session gets a prompt of its own.
+describe('something else gets in first', () => {
+  const notification = () => ({ text: '<task-notification>', wait: false, origin: { kind: 'task-notification' as const } })
+  const bash = { tool: 'Bash', command: 'true' }
+  const carried = (ran: { context?: readonly string[] }): string => (ran.context ?? []).join('\n')
+
+  test('a notification drained while the compaction ends carries the work, once', async ($, on) => {
+    mock.env(on, {})
+    const clock = mock.clock(on)
+    const submitted: string[] = []
+    const ended = Promise.withResolvers<void>()
+    on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 450_000, window: 1_000_000 }, rateLimits: [] } }))
+    on('session.compact', async () => {
+      await ended.promise
+      return { messages: SUMMARY, tokensBefore: 450_000, tokensAfter: 20_000 }
+    })
+    on('prompt.submit', ($, e) => {
+      if (e.origin.kind === 'plugin') submitted.push(e.text)
+      return { text: e.text, context: e.context, origin: e.origin }
+    })
+    on('turn.complete', ($, e) => ({ text: e.answer }))
+    on('tool.call', () => ({ result: 'ok', text: 'ok' }))
+    on('ui.log', () => ({ value: undefined }))
+    on('ui.status', () => ({ value: undefined }))
+    on('ui.toast', () => ({ value: undefined }))
+
+    await $.tool.call({ tool: TOOL, next: 'step 3' })
+    await $.turn.complete(turnEnd())
+    await clock.advance(0)
+
+    // The compaction has not resolved yet when the engine picks the next item.
+    const first = await $.prompt.submit(notification())
+    expect(carried(first)).toContain('step 3')
+    ended.resolve()
+    await drained(clock)
+    expect(submitted).toEqual([])
+    expect(carried(await $.tool.call(bash))).not.toContain('step 3')
+  })
+
+  test('a typed prompt carries it too, and is told it wins', async ($, on) => {
+    const w = world(on, 450_000)
+    await $.tool.call({ tool: TOOL, next: 'step 3' })
+    await $.turn.complete(turnEnd())
+    await w.clock.advance(0)
+    const typed = await $.prompt.submit(prompt('do something else'))
+    expect(typed.text).toBe('do something else')
+    expect(carried(typed)).toContain('step 3')
+    expect(carried(typed)).toContain('it wins')
+    await drained(w.clock)
+    expect(w.submitted).toEqual([])
+  })
+
+  test('a turn already running gets it on its next tool result, once', async ($, on) => {
+    const w = world(on, 450_000)
+    await $.tool.call({ tool: TOOL, next: 'step 3' })
+    await $.turn.complete(turnEnd())
+    await w.clock.advance(0)
+    await $.turn.start({ text: 'x', turnId: 't2' })
+    await drained(w.clock)
+    expect(w.submitted).toEqual([])
+
+    expect(carried(await $.tool.call(bash))).toContain('step 3')
+    expect(carried(await $.tool.call(bash))).not.toContain('step 3')
+    await $.turn.complete({ ...turnEnd(), turnId: 't2' })
+    await drained(w.clock)
+    expect(w.submitted).toEqual([])
+  })
+
+  test('a subagent’s tool result does not take it', async ($, on) => {
+    const w = world(on, 450_000)
+    await $.tool.call({ tool: TOOL, next: 'step 3' })
+    await $.turn.complete(turnEnd())
+    await w.clock.advance(0)
+    await $.turn.start({ text: 'x', turnId: 't2' })
+    await drained(w.clock)
+    expect(carried(await $.tool.call({ ...bash, agentId: 'agent-1' }))).not.toContain('step 3')
+    expect(carried(await $.tool.call(bash))).toContain('step 3')
+  })
+
+  test('that turn ending with no tool call hands it to a prompt of its own', async ($, on) => {
+    const w = world(on, 450_000)
+    await $.tool.call({ tool: TOOL, next: 'step 3' })
+    await $.turn.complete(turnEnd())
+    await w.clock.advance(0)
+    await $.turn.start({ text: 'x', turnId: 't2' })
+    await drained(w.clock)
+    await $.turn.complete({ ...turnEnd(), turnId: 't2' })
+    await drained(w.clock)
+    expect(w.submitted.length).toBe(1)
+    expect(w.submitted[0]?.text).toContain('step 3')
+  })
+
+  test('that turn interrupted drops it: the user takes over', async ($, on) => {
+    const w = world(on, 450_000)
+    await $.tool.call({ tool: TOOL, next: 'step 3' })
+    await $.turn.complete(turnEnd())
+    await w.clock.advance(0)
+    await $.turn.start({ text: 'x', turnId: 't2' })
+    await drained(w.clock)
+    await $.turn.complete({ ...turnEnd('aborted'), turnId: 't2' })
+    await drained(w.clock)
+    expect(w.submitted).toEqual([])
+    expect(carried(await $.tool.call(bash))).not.toContain('step 3')
+  })
+
+  test('nothing is owed after a failure nobody has to resume from', async ($, on) => {
+    mock.env(on, {})
+    const clock = mock.clock(on)
+    on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 450_000, window: 1_000_000 }, rateLimits: [] } }))
+    on('session.compact', () => {
+      throw new Error('summarizer failed')
+    })
+    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context, origin: e.origin }))
+    on('turn.complete', ($, e) => ({ text: e.answer }))
+    on('tool.call', () => ({ result: 'ok', text: 'ok' }))
+    on('ui.log', () => ({ value: undefined }))
+    on('ui.status', () => ({ value: undefined }))
+    on('ui.toast', () => ({ value: undefined }))
+    await $.tool.call({ tool: TOOL, next: 'step 3' })
+    await $.turn.complete(turnEnd())
+    await drained(clock)
+    expect(carried(await $.prompt.submit(notification()))).not.toContain('step 3')
+    expect(carried(await $.tool.call(bash))).not.toContain('step 3')
   })
 })
 

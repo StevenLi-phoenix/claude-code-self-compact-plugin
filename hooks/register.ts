@@ -29,6 +29,11 @@ const REMIND_STEP = 100_000
 // What a carry-on quotes of the Stop hook that held the work open.
 const HELD_MAX = 2_000
 
+// How long a finished compaction leaves the engine to start what it had queued,
+// before an idle session gets a prompt of its own. The engine drains its queue as the
+// compaction ends, and a chain's first hook runs within milliseconds of that.
+export const SETTLE_MS = 1_000
+
 const SCHEMA = {
   type: 'object',
   properties: {
@@ -65,6 +70,9 @@ let isCompacting = false
 // for a real turn end: each forced round costs a model call, so a summarizer that
 // keeps failing must not loop them.
 let isForcingOff = false
+// The carry-on not yet handed over, and whether a main-loop turn could take it.
+let owed: string | undefined
+let isTurnRunning = false
 // The context size at the last reminder; cleared once it is back under the line.
 let remindedAt: number | undefined
 
@@ -99,32 +107,55 @@ function describe(min: number): string {
   ].join(' ')
 }
 
-// Starts the turn after the compaction on the work Claude said remains. Without
-// it the session sat idle until the user typed (2026-10-20). Another turn can get
-// in first (a background task's notification) and work on, so the prompt never
-// reads as if nothing were done yet (2026-11-06).
-async function carryOn($: EngineInterface, job: Pending, didNotRun?: string): Promise<void> {
+// What the turn after the compaction starts on: the work Claude said remains. Without
+// it the session sat idle until the user typed (2026-10-20). Undefined: nothing to do.
+function carryOnText(job: Pending, didNotRun?: string): string | undefined {
   const { next, heldBy } = job
-  if (!next && heldBy === undefined) return
-  const text = [
+  if (!next && heldBy === undefined) return undefined
+  return [
     didNotRun === undefined ? 'Compacted at your request.' : `The compaction did not run (${didNotRun}); you keep the context you had.`,
     next ? `Carry on with what is not done yet: ${next}` : 'Carry on with what the Stop hook below still asks for.',
     ...(heldBy === undefined ? [] : [`\n\nA Stop hook held this work open when the turn ended: ${heldBy.slice(0, HELD_MAX)}`]),
   ].join(' ')
+}
+
+// A carry-on riding beside something that got in first, once.
+function takeOwed($: EngineInterface, on: string): string | undefined {
+  const text = owed
+  if (text === undefined) return undefined
+  owed = undefined
+  $.ui.log(`carrying on, beside ${on}`, { to: 'debug' })
+  return `${text}\n\nThis comes beside something that reached you first: if that says otherwise, it wins.`
+}
+
+// An idle session needs a prompt to start a turn. A plugin's prompt only runs once
+// idle and behind a notification, so it never goes out over a running turn: that turn's
+// next tool result takes it, or this runs again when it ends. A session got it five
+// minutes late as a new order, while it worked on the same thing (2026-11-06).
+async function submitOwed($: EngineInterface): Promise<void> {
+  if (owed === undefined || isTurnRunning) return
+  const text = owed
+  owed = undefined
   try {
     await $.prompt.submit({ text })
-    $.ui.log(`carrying on after the compaction: ${next ?? 'what the Stop hook asks for'}`, { to: 'debug' })
+    $.ui.log('carrying on, with a prompt of its own', { to: 'debug' })
   } catch (err) {
     $.ui.log(`could not carry on after the compaction: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
+function settleOwed($: EngineInterface): void {
+  $.clock.after(SETTLE_MS, () => void submitOwed($))
+}
+
 // A compaction that did not run: the user speaks next, unless the mod ended the
 // turn over a Stop hook. Then resuming is its job, or a /goal sits paused.
-async function afterNoRun($: EngineInterface, job: Pending, why: string): Promise<void> {
+function afterNoRun($: EngineInterface, job: Pending, why: string): void {
+  owed = undefined
   if (job.heldBy === undefined) return
   isForcingOff = true
-  await carryOn($, job, why)
+  owed = carryOnText(job, why)
+  settleOwed($)
 }
 
 // What Claude reads past the reminder size, or undefined: on crossing it, then
@@ -166,28 +197,33 @@ async function compact($: EngineInterface, job: Pending, attempt: number): Promi
       pending = undefined
       $.ui.status(undefined)
       $.ui.log(`dropped, the context is already ${fmt(tokens)} tokens (needs > ${fmt(min)})`)
-      await carryOn($, job)
+      owed = carryOnText(job)
+      settleOwed($)
       return
     }
 
     $.ui.status('compacting at Claude’s request…')
+    // Before the call: the engine starts what it had queued as the compaction ends,
+    // ahead of the code after this await.
+    owed = carryOnText(job)
     const done = await $.session.compact(job.instructions ? { instructions: job.instructions } : {})
     pending = undefined
     $.ui.status(undefined)
 
     if (done.skip !== undefined) {
       $.ui.log(`compaction skipped: ${done.skip}`)
-      await afterNoRun($, job, done.skip)
+      afterNoRun($, job, done.skip)
       return
     }
     isForcingOff = false
     const line = `compacted at Claude’s request: ${fmt(done.tokensBefore ?? job.tokens)} → ${fmt(done.tokensAfter)} tokens`
     $.ui.toast(line)
     $.ui.log(line, { to: 'debug' })
-    await carryOn($, job)
+    settleOwed($)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     const busy = isBusy(message)
+    owed = undefined
 
     if (busy && attempt < MAX_RETRIES) {
       $.ui.log(`busy, retry ${attempt + 1}/${MAX_RETRIES}: ${message}`, { to: 'debug' })
@@ -206,7 +242,7 @@ async function compact($: EngineInterface, job: Pending, attempt: number): Promi
     pending = undefined
     $.ui.status(undefined)
     $.ui.log(`compaction failed: ${message}`)
-    await afterNoRun($, job, message)
+    afterNoRun($, job, message)
   } finally {
     isCompacting = false
   }
@@ -259,16 +295,20 @@ export const register: Register = on => {
     // /compact is already the compaction; a reminder would land in its summary.
     if (e.command?.name === 'compact') return next(e)
 
+    const carrying = e.command === undefined ? takeOwed($, `a prompt (${e.origin.kind})`) : undefined
     const text = await reminder($).catch(() => undefined)
-    return next(text ? { ...e, context: [...(e.context ?? []), text] } : e)
+    const context = [...(e.context ?? []), ...(carrying ? [carrying] : []), ...(text ? [text] : [])]
+    return next(context.length > (e.context?.length ?? 0) ? { ...e, context } : e)
   })
 
   on('tool.call', async ($, e, next) => {
     const done = await next(e)
     if (e.agentId !== undefined || done.deny !== undefined) return done
 
+    const carrying = takeOwed($, `a tool result (${e.tool})`)
     const text = await reminder($).catch(() => undefined)
-    return text ? { ...done, context: [...(done.context ?? []), text] } : done
+    const context = [...(done.context ?? []), ...(carrying ? [carrying] : []), ...(text ? [text] : [])]
+    return context.length > (done.context?.length ?? 0) ? { ...done, context } : done
   })
 
   // /goal is a Stop hook: until its condition holds it turns each attempt to end
@@ -295,9 +335,25 @@ export const register: Register = on => {
     return { ...answered, preventContinuation: true, stopReason: 'self-compact: ending the turn to compact; the work resumes after it' }
   })
 
+  on('turn.start', ($, e, next) => {
+    if (e.agentId === undefined) isTurnRunning = true
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     const answered = await next(e)
-    if (e.agentId !== undefined || pending === undefined) return answered
+    if (e.agentId !== undefined) return answered
+
+    isTurnRunning = false
+    if (owed !== undefined) {
+      if (e.reason === 'answer') settleOwed($)
+      else {
+        // Interrupted or failed: the user takes over, as for a queued compaction.
+        owed = undefined
+        $.ui.log(`turn ended (${e.reason}); the carry-on is dropped`, { to: 'debug' })
+      }
+    }
+    if (pending === undefined) return answered
 
     if (e.reason !== 'answer') {
       // Interrupted or failed turn: the user takes over, so drop the request.
