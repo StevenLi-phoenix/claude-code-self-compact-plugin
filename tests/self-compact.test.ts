@@ -671,6 +671,17 @@ describe('reminder past 300k', () => {
     w.setTokens(410_000)
     expect(reminded(await $.prompt.submit(prompt()))).toContain('past 400k')
   })
+
+  test('SELF_COMPACT_REMIND_TOKENS moves the reminder line', async ($, on) => {
+    const w = world(on, 550_000, { SELF_COMPACT_REMIND_TOKENS: '600000' })
+    expect(reminded(await $.prompt.submit(prompt()))).toBe('')
+    w.setTokens(610_000)
+    expect(reminded(await $.prompt.submit(prompt()))).toContain('past 600k')
+    w.setTokens(650_000)
+    expect(reminded(await $.prompt.submit(prompt()))).toBe('')
+    w.setTokens(720_000)
+    expect(reminded(await $.prompt.submit(prompt()))).toContain('past 600k')
+  })
 })
 
 test('registers the tool in the prompt with the threshold in its description', async ($, on) => {

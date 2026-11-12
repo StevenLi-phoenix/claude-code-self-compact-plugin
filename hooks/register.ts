@@ -23,7 +23,9 @@ const MAX_RETRIES = 5
 // judgment, not an order): once on crossing it, then each time the context grew
 // another step, at a prompt or after a tool call, whichever comes first. Not on
 // every prompt (2026-10-20). 2026-10-20: a session ran to 440k with nobody calling the tool.
+// SELF_COMPACT_REMIND_TOKENS moves the line (held to at least the floor).
 const REMIND_TOKENS = 300_000
+const REMIND_FLOOR = 100_000
 const REMIND_STEP = 100_000
 
 // What a carry-on quotes of the Stop hook that held the work open.
@@ -92,6 +94,13 @@ async function idleMinTokens($: EngineInterface): Promise<number> {
   const n = raw ? Number(raw) : NaN
 
   return Number.isFinite(n) ? Math.max(IDLE_MIN_FLOOR, n) : IDLE_MIN_DEFAULT
+}
+
+async function remindTokens($: EngineInterface): Promise<number> {
+  const raw = (await $.env.get('SELF_COMPACT_REMIND_TOKENS'))?.trim()
+  const n = raw ? Number(raw) : NaN
+
+  return Number.isFinite(n) ? Math.max(REMIND_FLOOR, n) : REMIND_TOKENS
 }
 
 async function isCompactDisabled($: EngineInterface): Promise<boolean> {
@@ -167,7 +176,7 @@ async function reminder($: EngineInterface): Promise<string | undefined> {
   if (pending !== undefined || (await isCompactDisabled($))) return undefined
 
   // Never below the size the tool accepts, or the reminder points at a refusal.
-  const min = Math.max(REMIND_TOKENS, await idleMinTokens($))
+  const min = Math.max(await remindTokens($), await idleMinTokens($))
   const tokens = (await $.session.usage()).context.tokens
   if (tokens === undefined || !(tokens > min)) {
     remindedAt = undefined

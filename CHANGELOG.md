@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.6] - 2026-11-11
+
+### Added
+- `SELF_COMPACT_REMIND_TOKENS` env sets the reminder line (default 300k, floor 100k).
+
 ## [0.2.5] - 2026-11-06
 
 ### Fixed
